@@ -294,6 +294,7 @@ class Surface {
     public static final int minCoord = 0;
     public static final int maxCoord = 1024*1024*256;
     private int numThreads;
+    private int NT = setNT();
     // The following 9 fields are set by the Surface constructor.
     private final Coordinator coord;
         // Not needed at present, but will need to be passed to any
@@ -309,7 +310,8 @@ class Surface {
     private double geom;        // degree of geometric realism
     private int degree;         // desired average node degree
     private final Random prn;   // pseudo-random number generator
-
+    private int finishedThread = 0;
+    
     private class Vertex {
         public final int xCoord;
         public final int yCoord;
@@ -327,8 +329,7 @@ class Surface {
         public void setIndex(int ind) {
             index = ind;
         }
-    
-
+        
         // Override Object.hashCode and Object.equals.
         // This way two vertices are equal (and hash to the same slot in
         // HashSet vertexHash) if they have the same coordinates, even if they
@@ -409,7 +410,14 @@ class Surface {
         }
     }
 
-    public void forSource(VertexRoutine pr) {
+    private int setNT() {
+		if (numThreads < 1)
+			return 1;
+		else
+			return numThreads;
+	}
+
+	public void forSource(VertexRoutine pr) {
         pr.run(vertices[0].xCoord, vertices[0].yCoord);
     }
 
@@ -660,19 +668,20 @@ class Surface {
         return rtn;
     }
 
-    // Main solver routine.
-    //
-    public CyclicBarrier myBarrier = new CyclicBarrier(5);
+    CyclicBarrier myBarrier = new CyclicBarrier(NT);
+    CyclicBarrier myBarrierFinal = new CyclicBarrier(NT);
+    
     public class DeltaThread extends Thread {
         
         private ArrayList <Vertex> dvertices;
         private ArrayList <LinkedHashSet<Vertex>> dbuckets;
         private int i;
         private int id;
+        private Coordinator c;
 //      
         
 
-        public DeltaThread(ArrayList <Vertex> vertices, int i, Vertex source, int id) {
+        public DeltaThread(ArrayList <Vertex> vertices, int i, Vertex source, int id, Coordinator c) {
             this.id = id;
             this.dvertices = vertices;
             this.i = i;
@@ -681,6 +690,7 @@ class Surface {
               dbuckets.add(new LinkedHashSet<Vertex>());
             }
             dbuckets.get(0).add(source);
+            this.c = c;
         }
         
         public void addVertices (Vertex v) {
@@ -689,7 +699,9 @@ class Surface {
         
         public void run(){
             //if (there is msg for dis thread - add vertex,
+        	c.register();
             try {
+            	for(;;) {
                 LinkedList<Vertex> removed = new LinkedList<Vertex>();
                 LinkedList<Request> requests;
                 System.out.println("thread # " + id + " vertices: " + dvertices);
@@ -743,15 +755,38 @@ class Surface {
                     }
                 }
                 
+               
+                int j = i;
+                do {
+                    j = (j + 1) % numBuckets;
+                } while (j != i && buckets.get(j).size() == 0);
+                if (i == j) {
+                	boolean emptyhash = true;
+                    for (int k = 0; k < numThreads; k++) {
+                        if (k != id) {
+                            if (!messQMap.get(k).get(id).isEmpty()) {
+                                emptyhash = false;
+                            }
+                        }
+                    } 
+                    if (emptyhash)
+                    	finishedThread++;
+                }
+                myBarrierFinal.await();
+                if (finishedThread == numThreads)
+                	break;
+                else
+                	finishedThread = 0;
                 i = (i+1)%(dbuckets.size()-1);
-                
-            } catch (Coordinator.KilledException k) {
+            	}} catch (Coordinator.KilledException k) {
                 System.out.println(k);
             } catch (InterruptedException i) {
                 System.out.println(i);
             } catch (BrokenBarrierException b) {
                 System.out.println(b);
             }
+            
+            c.unregister();
             }
         //      
                 
@@ -777,6 +812,10 @@ class Surface {
     HashMap <Integer, HashMap< Integer, ConcurrentLinkedQueue<Request>>> messQMap = new HashMap <>();
     public void DeltaSolve() throws Coordinator.KilledException {
         ArrayList <DeltaThread> dts = new ArrayList <>(); //create list of threads
+        if (numThreads > 0){
+        	CyclicBarrier myBarrier = new CyclicBarrier(numThreads);
+        }
+
         numBuckets = 2 * degree;
         delta = maxCoord / degree;
         // All buckets, together, cover a range of 2 * maxCoord,
@@ -791,7 +830,7 @@ class Surface {
                     messQMap.put(i, map);//origin
                 }
             }
-            DeltaThread d = new DeltaThread(new ArrayList<Vertex>(), 0, vertices[0], i);
+            DeltaThread d = new DeltaThread(new ArrayList<Vertex>(), 0, vertices[0], i, coord);
             dts.add(d);//init threads
         }
         int threadCount = 0;//index of thread
