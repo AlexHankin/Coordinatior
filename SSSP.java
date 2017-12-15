@@ -670,17 +670,15 @@ class Surface {
         
         private ArrayList <Vertex> dvertices;
         private ArrayList <LinkedHashSet<Vertex>> dbuckets;
-        private HashMap <Integer, ConcurrentLinkedQueue<String>> messQMap;
         private int i;
         private int id;
 //      
         
 
-        public DeltaThread(ArrayList <Vertex> vertices, int i, Vertex source, int id,HashMap <Integer, ConcurrentLinkedQueue<String>> messQMap ) {
+        public DeltaThread(ArrayList <Vertex> vertices, int i, Vertex source, int id) {
             this.id = id;
             this.dvertices = vertices;
             this.i = i;
-            this.messQMap = messQMap;
             dbuckets = new ArrayList<LinkedHashSet<Vertex>>(numBuckets);
             for (int k= 0; k< numBuckets; k++) {
               dbuckets.add(new LinkedHashSet<Vertex>());
@@ -711,7 +709,7 @@ class Surface {
                     for (Request req : requests) {
                         if (!dvertices.contains(req.v)) {
                             System.out.println("HALP light");
-                            messQMap.get(req.v.index).add(" vertex " + Integer.toString(id));
+                            messQMap.get(id).get(req.v.index).add(req.v);//add vertex to appropriate thread
                         } else {
                             dbuckets = req.relax(dbuckets, id);
                         }
@@ -723,8 +721,9 @@ class Surface {
                 for (Request req : requests) {
                     if (!dvertices.contains(req.v)) {
                         System.out.println("HALP heavy");
-                        messQMap.get(req.v.index).add(" thread id " + Integer.toString(id));
+                        messQMap.get(id).get(req.v.index).add(req.v);
                     } else {
+                        
                         dbuckets = req.relax(dbuckets, id);
                     }
                 }
@@ -764,7 +763,8 @@ class Surface {
                 }
         }
         
-    
+
+    HashMap <Integer, HashMap< Integer, ConcurrentLinkedQueue<Vertex>>> messQMap = new HashMap <>();
     public void DeltaSolve() throws Coordinator.KilledException {
         ArrayList <DeltaThread> dts = new ArrayList <>(); //create list of threads
         numBuckets = 2 * degree;
@@ -774,13 +774,14 @@ class Surface {
         // will never wrap all the way around the array.
         for (int i = 0; i < numThreads; i++) {
             
-            HashMap <Integer, ConcurrentLinkedQueue<String>> messQMap = new HashMap <> ();
+            HashMap <Integer, ConcurrentLinkedQueue<Vertex>> map = new HashMap <> ();
             for (int j = 0; j < numThreads; j++) {
                 if (i!=j) {
-                    messQMap.put(j, new ConcurrentLinkedQueue<>());
+                    map.put(j, new ConcurrentLinkedQueue<>());//destination of msg
+                    messQMap.put(i, map);
                 }
             }
-            DeltaThread d = new DeltaThread(new ArrayList<Vertex>(), 0, vertices[0], i, messQMap);
+            DeltaThread d = new DeltaThread(new ArrayList<Vertex>(), 0, vertices[0], i);
             dts.add(d);//init threads
         }
         int threadCount = 0;//index of thread
