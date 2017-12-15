@@ -737,6 +737,7 @@ class Surface {
                     }
                 }
                 //Bucket i is processed
+                //Barrier so that each thread can catch up and be on the same bucket
                 myBarrier.await();
                 //loop for processing requests from message queues
                 for (int k = 0; k < numThreads; k++) {                  
@@ -750,11 +751,13 @@ class Surface {
                     }
                 }
                 
-               
+               //Here we do another check for when a bucket is searched each threads sees if they have empty buckets and all message cues
+               //If yes then an global variable is incremented, and by the time the second barrier is reached, if that variable equals the number of threads
+                //the algorithm is done.
                 int j = i;
                 do {
                     j = (j + 1) % numBuckets;
-                } while (j != i && buckets.get(j).size() == 0);
+                } while (j != i && dbuckets.get(j).size() == 0);
                 if (i == j) {
                     boolean emptyhash = true;
                     for (int k = 0; k < numThreads; k++) {
