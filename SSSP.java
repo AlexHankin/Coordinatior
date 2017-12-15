@@ -313,7 +313,7 @@ class Surface {
     private class Vertex {
         public final int xCoord;
         public final int yCoord;
-        private  int index;
+        private  int index;//thread index
         public Vector<Edge> neighbors;
 
         public long distToSource;
@@ -662,9 +662,6 @@ class Surface {
 
     // Main solver routine.
     //
-    
-    // Main solver routine.
-    //
     public CyclicBarrier myBarrier = new CyclicBarrier(5);
     public class DeltaThread extends Thread {
         
@@ -709,7 +706,7 @@ class Surface {
                     for (Request req : requests) {
                         if (!dvertices.contains(req.v)) {
                             System.out.println("HALP light");
-                            messQMap.get(id).get(req.v.index).add(req.v);//add vertex to appropriate thread
+                            messQMap.get(id).get(req.v.index).add(req);//add vertex to appropriate thread
                         } else {
                             dbuckets = req.relax(dbuckets, id);
                         }
@@ -721,7 +718,7 @@ class Surface {
                 for (Request req : requests) {
                     if (!dvertices.contains(req.v)) {
                         System.out.println("HALP heavy");
-                        messQMap.get(id).get(req.v.index).add(req.v);
+                        messQMap.get(id).get(req.v.index).add(req);
                     } else {
                         
                         dbuckets = req.relax(dbuckets, id);
@@ -730,9 +727,22 @@ class Surface {
                 System.out.println("run: thread id "+id+" messqmap : "+messQMap);
                 System.out.println();
                 System.out.println("end run: dbuckets " + dbuckets);
-                System.out.println();
-                System.out.println();
                 myBarrier.await();
+                for (int k = 0; k < numThreads; k++) {
+                    //while the incoming message q from thread k to current thread isn't empty
+                    
+                    if (k != id) {
+                        System.out.println();
+                        System.out.println("messqmap");
+                        while (!messQMap.get(k).get(id).isEmpty()) {
+                            System.out.println(messQMap.get(k).get(id).peek());
+                            //relax the vertices passed from other threads in ith bucket
+                            messQMap.get(k).get(id).poll().relax(dbuckets, id);//TODO
+                        }
+                        System.out.println();
+                    }
+                }
+                
                 i = (i+1)%(dbuckets.size()-1);
                 
             } catch (Coordinator.KilledException k) {
@@ -764,7 +774,7 @@ class Surface {
         }
         
 
-    HashMap <Integer, HashMap< Integer, ConcurrentLinkedQueue<Vertex>>> messQMap = new HashMap <>();
+    HashMap <Integer, HashMap< Integer, ConcurrentLinkedQueue<Request>>> messQMap = new HashMap <>();
     public void DeltaSolve() throws Coordinator.KilledException {
         ArrayList <DeltaThread> dts = new ArrayList <>(); //create list of threads
         numBuckets = 2 * degree;
@@ -774,11 +784,11 @@ class Surface {
         // will never wrap all the way around the array.
         for (int i = 0; i < numThreads; i++) {
             
-            HashMap <Integer, ConcurrentLinkedQueue<Vertex>> map = new HashMap <> ();
+            HashMap <Integer, ConcurrentLinkedQueue<Request>> map = new HashMap <> ();
             for (int j = 0; j < numThreads; j++) {
                 if (i!=j) {
                     map.put(j, new ConcurrentLinkedQueue<>());//destination of msg
-                    messQMap.put(i, map);
+                    messQMap.put(i, map);//origin
                 }
             }
             DeltaThread d = new DeltaThread(new ArrayList<Vertex>(), 0, vertices[0], i);
