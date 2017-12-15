@@ -19,6 +19,8 @@ import java.awt.event.*;
 import java.io.*;
 import javax.swing.*;
 import java.util.*;
+import java.util.concurrent.BrokenBarrierException;
+import java.util.concurrent.CyclicBarrier;
 import java.lang.*;
 
 public class SSSP {
@@ -157,7 +159,7 @@ public class SSSP {
     //
     private Surface build(RootPaneContainer pane, int an) {
         final Coordinator c = new Coordinator();
-        Surface s = new Surface(n, sd, geom, degree, c);
+        Surface s = new Surface(n, sd, geom, degree, c, numThreads);
         Animation at = null;
         if (an == SHOW_RESULT || an == FULL_ANIMATION) {
             at = new Animation(s);
@@ -287,9 +289,10 @@ class Worker extends Thread {
 //
 class Surface {
     // all X and Y coordinates will be in the range [0..2^28)
+    
     public static final int minCoord = 0;
     public static final int maxCoord = 1024*1024*256;
-
+    private int numThreads;
     // The following 9 fields are set by the Surface constructor.
     private final Coordinator coord;
         // Not needed at present, but will need to be passed to any
@@ -309,7 +312,7 @@ class Surface {
     private class Vertex {
         public final int xCoord;
         public final int yCoord;
-
+        private  int index;
         public Vector<Edge> neighbors;
 
         public long distToSource;
@@ -319,6 +322,11 @@ class Surface {
         public void addNeighbor(Edge e) {
             neighbors.add(e);
         }
+        
+        public void setIndex(int ind) {
+            index = ind;
+        }
+    
 
         // Override Object.hashCode and Object.equals.
         // This way two vertices are equal (and hash to the same slot in
@@ -340,19 +348,6 @@ class Surface {
             neighbors = new Vector<Edge>();
             distToSource = Long.MAX_VALUE;
             predecessor = null;
-        }
-    }
-
-    // Distance-based Comparator for use in Dijkstra priority queue.
-    // Note: this comparator imposes orderings that are inconsistent with equals.
-    // More specifically: v1.equals(v2) => compare(v1, v2) == 0, but it is
-    // not necessarily the case that compare(v1, v2) == 0 => v1.equals(v2).
-    //
-    private class DistanceComparator implements Comparator<Vertex> {
-        public int compare(Vertex v1, Vertex v2) {
-            if (v1.distToSource < v2.distToSource) return -1;
-            if (v2.distToSource < v1.distToSource) return 1;
-            return 0;
         }
     }
 
@@ -550,33 +545,56 @@ class Surface {
     // *************************
     // Find shortest paths via Dijkstra's algorithm.
     //
+    // Dijkstra's algorithm assumes a priority queue with a log-time decreaseKey
+    // method, which Java's PriorityQueue class doesn't support (and can't easily
+    // support, because it doesn't export references to its internal tree nodes.
+    // The workaround here, due to Jackson Abascal, adds an extra distance field,
+    // "weight," which is equal to v.distToSource when v is first inserted in the
+    // PQ, but keeps its value even when v.distToSoure is reduced.  When we want
+    // to reduce a key, we simply insert the vertex again, and leave the old
+    // reference in place.  The old one has a weight that's worse than
+    // v.distToSource, allowing us to skip over it.
+    //
+    class WeightedVertex implements Comparable<WeightedVertex> {
+        Vertex v;
+        long weight;
+
+        public WeightedVertex(Vertex n) {
+            v = n;
+            weight = v.distToSource;
+        }
+
+        public int compareTo(WeightedVertex other) {
+            if (weight < other.weight) return -1;
+            if (weight == other.weight) return 0;
+            return 1;
+        }
+    }
+
     public void DijkstraSolve() throws Coordinator.KilledException {
-        PriorityQueue<Vertex> pq = new PriorityQueue<Vertex>(n, new DistanceComparator());
-        Vertex v = vertices[0];
-        for (Edge e : v.neighbors) {
-            Vertex o = e.other(v);
-            o.distToSource = e.weight;
-            o.predecessor = e;
-        }
-        for (int i = 1; i < n; i++) {   // don't bother adding source
-            pq.add(vertices[i]);
-        }
+        PriorityQueue<WeightedVertex> pq =
+            new PriorityQueue<WeightedVertex>((n * 12) / 10);
+            // Leave some room for extra umremoved entries.
+        vertices[0].distToSource = 0;
+        // All other vertices still have maximal distToSource, as set by constructor.
+        pq.add(new WeightedVertex(vertices[0]));
         while (!pq.isEmpty()) {
-            v = pq.poll();
-            if (v.distToSource == Long.MAX_VALUE) {
-                // this is a disconnected vertex, as are all that remain
-                break;
+            WeightedVertex wv = pq.poll();
+            Vertex v = wv.v;
+            if (v.predecessor != null) {
+                v.predecessor.select();
             }
-            v.predecessor.select();
+            if (wv.weight != v.distToSource) {
+                // This is a left-over pq entry.
+                continue;
+            }
             for (Edge e : v.neighbors) {
                 Vertex o = e.other(v);
                 long altDist = v.distToSource + e.weight;
-                // relax (o, altDist)
                 if (altDist < o.distToSource) {
-                    pq.remove(o);
                     o.distToSource = altDist;
                     o.predecessor = e;
-                    pq.add(o);
+                    pq.add(new WeightedVertex(o));
                 }
             }
         }
@@ -597,10 +615,12 @@ class Surface {
         private Vertex v;
         private Edge e;
 
+      
+
         // To relax a request is to consider whether the e might provide
         // v with a better path back to the source.
         //
-        public void relax() throws Coordinator.KilledException {
+        public ArrayList <LinkedHashSet<Vertex>> relax( ArrayList <LinkedHashSet<Vertex>> buckets) throws Coordinator.KilledException {
             Vertex o = e.other(v);
             long altDist = o.distToSource + e.weight;
             if (altDist < v.distToSource) {
@@ -614,6 +634,9 @@ class Surface {
                 e.select();
                 buckets.get((int)((altDist / delta) % numBuckets)).add(v);
             }
+            System.out.println("buckets:");
+            System.out.println(buckets);
+            return buckets;
         }
 
         public Request(Vertex V, Edge E) {
@@ -633,50 +656,139 @@ class Surface {
                 }
             }
         }
+        System.out.println("Request:");
+        System.out.println(rtn);
         return rtn;
     }
 
     // Main solver routine.
     //
+    
+    // Main solver routine.
+    //
+    public CyclicBarrier myBarrier = new CyclicBarrier(5);
+    public class DeltaThread extends Thread {
+        
+        private ArrayList <Vertex> vertices;
+        private ArrayList <LinkedHashSet<Vertex>> buckets;
+        private int i;
+        private int id;
+//      
+        
+
+        public DeltaThread(ArrayList <Vertex> vertices, int i, Vertex source, int id) {
+            this.id = id;
+            this.vertices = vertices;
+            this.i = i;
+            buckets = new ArrayList<LinkedHashSet<Vertex>>(numBuckets);
+            for (int k= 0; k< numBuckets; k++) {
+              buckets.add(new LinkedHashSet<Vertex>());
+            }
+            buckets.get(0).add(source);
+        }
+        
+        public void addVertices (Vertex v) {
+            vertices.add(v);
+        }
+        public void run(){
+            //if (there is msg for dis thread - add vertex,
+            try {
+                LinkedList<Vertex> removed = new LinkedList<Vertex>();
+                LinkedList<Request> requests;
+                
+                while (buckets.get(i).size() > 0) {
+                    System.out.println("Thread # "+id);
+                    System.out.println("bucets");
+                    System.out.println(buckets);
+                    requests = findRequests(buckets.get(i), true);  // light relaxations
+                    // Move all vertices from bucket i to removed list.
+                  //  System.out.println("requests:");
+                  //  System.out.println(requests);
+                    removed.addAll(buckets.get(i));
+                    buckets.set(i, new LinkedHashSet<Vertex>());
+                    for (Request req : requests) {
+                        buckets = req.relax(buckets);
+                    }
+                }
+                // Now bucket i is empty.
+                requests = findRequests(removed, false);    // heavy relaxations
+                for (Request req : requests) {
+                    buckets = req.relax(buckets);
+                }
+                
+                myBarrier.await();
+                i = (i+1)%(buckets.size()-1);
+            } catch (Coordinator.KilledException k) {
+                System.out.println(k);
+            } catch (InterruptedException i) {
+                System.out.println(i);
+            } catch (BrokenBarrierException b) {
+                System.out.println(b);
+            }
+//              // Find next nonempty bucket.
+//              int j = i;
+//              do {
+//                  j = (j + 1) % numBuckets;
+//              } while (j != i && buckets.get(j).size() == 0);
+//              if (i == j) {
+//                  // Cycled all the way around; we're done
+//                  break;  // for (;;) loop
+//              }
+//              i = j;
+//          }
+            }
+        //      
+                
+        
+                
+                private void print() {
+                    for (int k = 0; k < vertices.size(); k++) {
+                        System.out.println("x is " + vertices.get(k).xCoord + " y is " + vertices.get(k).yCoord);
+                    }
+        //          for (int k = 0; k < buckets.size(); k++) {
+        //              Iterator <Vertex> v =  buckets.get(k).iterator();
+        //              while (v.hasNext()) {
+        //                  System.out.print(v.next().xCoord+" " + v.next().yCoord);
+        //              }
+        //              System.out.println();
+        //          }
+                    System.out.println("Thread # "+id);
+                    System.out.println(buckets);
+                }
+        }
+        
+    
     public void DeltaSolve() throws Coordinator.KilledException {
+        ArrayList <DeltaThread> dts = new ArrayList <>(); //create list of threads
         numBuckets = 2 * degree;
         delta = maxCoord / degree;
         // All buckets, together, cover a range of 2 * maxCoord,
         // which is larger than the weight of any edge, so a relaxation
         // will never wrap all the way around the array.
+        for (int i = 0; i < numThreads; i++) {
+            DeltaThread d = new DeltaThread(new ArrayList<Vertex>(), 0, vertices[0], i);
+            dts.add(d);//init threads
+        }
+        int threadCount = 0;//index of thread
+        
+        for (int i = 0; i < n; i++) {
+            Vertex v = vertices [i];
+            dts.get(threadCount).addVertices(v);//add vertex to thread
+            vertices[i].index = threadCount;
+            threadCount = (threadCount+1)%numThreads;
+//          if (threadCount == (numThreads-1))
+//              threadCount = 0;
+//          else
+//              threadCount++;
+        }
         buckets = new ArrayList<LinkedHashSet<Vertex>>(numBuckets);
         for (int i = 0; i < numBuckets; ++i) {
             buckets.add(new LinkedHashSet<Vertex>());
         }
         buckets.get(0).add(vertices[0]);
-        int i = 0;
-        for (;;) {
-            LinkedList<Vertex> removed = new LinkedList<Vertex>();
-            LinkedList<Request> requests;
-            while (buckets.get(i).size() > 0) {
-                requests = findRequests(buckets.get(i), true);  // light relaxations
-                // Move all vertices from bucket i to removed list.
-                removed.addAll(buckets.get(i));
-                buckets.set(i, new LinkedHashSet<Vertex>());
-                for (Request req : requests) {
-                    req.relax();
-                }
-            }
-            // Now bucket i is empty.
-            requests = findRequests(removed, false);    // heavy relaxations
-            for (Request req : requests) {
-                req.relax();
-            }
-            // Find next nonempty bucket.
-            int j = i;
-            do {
-                j = (j + 1) % numBuckets;
-            } while (j != i && buckets.get(j).size() == 0);
-            if (i == j) {
-                // Cycled all the way around; we're done
-                break;  // for (;;) loop
-            }
-            i = j;
+        
+        for (DeltaThread dt: dts) {
+            dt.start();
         }
     }
 
@@ -685,13 +797,13 @@ class Surface {
 
     // Constructor
     //
-    public Surface(int N, long SD, double G, int D, Coordinator C) {
+    public Surface(int N, long SD, double G, int D, Coordinator C, int nt) {
         n = N;
         sd = SD;
         geom = G;
         degree = D;
         coord = C;
-
+        numThreads = nt;
         vertices = new Vertex[n];
         vertexHash = new HashSet<Vertex>(n);
         edges = new Vector<Edge>();
