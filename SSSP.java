@@ -20,6 +20,7 @@ import java.io.*;
 import javax.swing.*;
 import java.util.*;
 import java.util.concurrent.BrokenBarrierException;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CyclicBarrier;
 import java.lang.*;
 
@@ -620,7 +621,7 @@ class Surface {
         // To relax a request is to consider whether the e might provide
         // v with a better path back to the source.
         //
-        public ArrayList <LinkedHashSet<Vertex>> relax( ArrayList <LinkedHashSet<Vertex>> buckets) throws Coordinator.KilledException {
+        public ArrayList <LinkedHashSet<Vertex>> relax( ArrayList <LinkedHashSet<Vertex>> buckets, int id) throws Coordinator.KilledException {
             Vertex o = e.other(v);
             long altDist = o.distToSource + e.weight;
             if (altDist < v.distToSource) {
@@ -634,8 +635,7 @@ class Surface {
                 e.select();
                 buckets.get((int)((altDist / delta) % numBuckets)).add(v);
             }
-            System.out.println("buckets:");
-            System.out.println(buckets);
+            System.out.println("relax: thread id: "+ id+ " buckets: "+buckets);
             return buckets;
         }
 
@@ -646,7 +646,7 @@ class Surface {
 
     // Return list of requests whose connecting edge weight is <= or > than delta.
     //
-    LinkedList<Request> findRequests(Collection<Vertex> bucket, boolean light) {
+    LinkedList<Request> findRequests(Collection<Vertex> bucket, boolean light, int id) {
         LinkedList<Request> rtn = new LinkedList<Request>();
         for (Vertex v : bucket) {
             for (Edge e : v.neighbors) {
@@ -656,8 +656,7 @@ class Surface {
                 }
             }
         }
-        System.out.println("Request:");
-        System.out.println(rtn);
+        System.out.println("findReq: thread id: "+ id + " request: " +rtn);
         return rtn;
     }
 
@@ -669,55 +668,74 @@ class Surface {
     public CyclicBarrier myBarrier = new CyclicBarrier(5);
     public class DeltaThread extends Thread {
         
-        private ArrayList <Vertex> vertices;
-        private ArrayList <LinkedHashSet<Vertex>> buckets;
+        private ArrayList <Vertex> dvertices;
+        private ArrayList <LinkedHashSet<Vertex>> dbuckets;
+        private HashMap <Integer, ConcurrentLinkedQueue<String>> messQMap;
         private int i;
         private int id;
 //      
         
 
-        public DeltaThread(ArrayList <Vertex> vertices, int i, Vertex source, int id) {
+        public DeltaThread(ArrayList <Vertex> vertices, int i, Vertex source, int id,HashMap <Integer, ConcurrentLinkedQueue<String>> messQMap ) {
             this.id = id;
-            this.vertices = vertices;
+            this.dvertices = vertices;
             this.i = i;
-            buckets = new ArrayList<LinkedHashSet<Vertex>>(numBuckets);
+            this.messQMap = messQMap;
+            dbuckets = new ArrayList<LinkedHashSet<Vertex>>(numBuckets);
             for (int k= 0; k< numBuckets; k++) {
-              buckets.add(new LinkedHashSet<Vertex>());
+              dbuckets.add(new LinkedHashSet<Vertex>());
             }
-            buckets.get(0).add(source);
+            dbuckets.get(0).add(source);
         }
         
         public void addVertices (Vertex v) {
-            vertices.add(v);
+            dvertices.add(v);
         }
+        
         public void run(){
             //if (there is msg for dis thread - add vertex,
             try {
                 LinkedList<Vertex> removed = new LinkedList<Vertex>();
                 LinkedList<Request> requests;
-                
-                while (buckets.get(i).size() > 0) {
-                    System.out.println("Thread # "+id);
-                    System.out.println("bucets");
-                    System.out.println(buckets);
-                    requests = findRequests(buckets.get(i), true);  // light relaxations
-                    // Move all vertices from bucket i to removed list.
-                  //  System.out.println("requests:");
-                  //  System.out.println(requests);
-                    removed.addAll(buckets.get(i));
-                    buckets.set(i, new LinkedHashSet<Vertex>());
+                System.out.println("thread # " + id + " vertices: " + dvertices);
+                while (dbuckets.get(i).size() > 0) {
+                    
+                    requests = findRequests(dbuckets.get(i), true, id);  // light relaxations
+                    // Move all vertices from bucket i to removed list
+                   
+                    removed.addAll(dbuckets.get(i));
+                    dbuckets.set(i, new LinkedHashSet<Vertex>());
+                   
+                    System.out.println("run "+dbuckets);
+                    System.out.println("run: requests pls " +requests);
                     for (Request req : requests) {
-                        buckets = req.relax(buckets);
+                        if (!dvertices.contains(req.v)) {
+                            System.out.println("HALP light");
+                            messQMap.get(req.v.index).add(" vertex " + Integer.toString(id));
+                        } else {
+                            dbuckets = req.relax(dbuckets, id);
+                        }
                     }
                 }
-                // Now bucket i is empty.
-                requests = findRequests(removed, false);    // heavy relaxations
-                for (Request req : requests) {
-                    buckets = req.relax(buckets);
-                }
                 
+                // Now bucket i is empty.
+                requests = findRequests(removed, false, id);    // heavy relaxations
+                for (Request req : requests) {
+                    if (!dvertices.contains(req.v)) {
+                        System.out.println("HALP heavy");
+                        messQMap.get(req.v.index).add(" thread id " + Integer.toString(id));
+                    } else {
+                        dbuckets = req.relax(dbuckets, id);
+                    }
+                }
+                System.out.println("run: thread id "+id+" messqmap : "+messQMap);
+                System.out.println();
+                System.out.println("end run: dbuckets " + dbuckets);
+                System.out.println();
+                System.out.println();
                 myBarrier.await();
-                i = (i+1)%(buckets.size()-1);
+                i = (i+1)%(dbuckets.size()-1);
+                
             } catch (Coordinator.KilledException k) {
                 System.out.println(k);
             } catch (InterruptedException i) {
@@ -725,25 +743,14 @@ class Surface {
             } catch (BrokenBarrierException b) {
                 System.out.println(b);
             }
-//              // Find next nonempty bucket.
-//              int j = i;
-//              do {
-//                  j = (j + 1) % numBuckets;
-//              } while (j != i && buckets.get(j).size() == 0);
-//              if (i == j) {
-//                  // Cycled all the way around; we're done
-//                  break;  // for (;;) loop
-//              }
-//              i = j;
-//          }
             }
         //      
                 
         
                 
                 private void print() {
-                    for (int k = 0; k < vertices.size(); k++) {
-                        System.out.println("x is " + vertices.get(k).xCoord + " y is " + vertices.get(k).yCoord);
+                    for (int k = 0; k < dvertices.size(); k++) {
+                        System.out.println("x is " + dvertices.get(k).xCoord + " y is " + dvertices.get(k).yCoord);
                     }
         //          for (int k = 0; k < buckets.size(); k++) {
         //              Iterator <Vertex> v =  buckets.get(k).iterator();
@@ -753,7 +760,7 @@ class Surface {
         //              System.out.println();
         //          }
                     System.out.println("Thread # "+id);
-                    System.out.println(buckets);
+                    System.out.println(dbuckets);
                 }
         }
         
@@ -766,7 +773,14 @@ class Surface {
         // which is larger than the weight of any edge, so a relaxation
         // will never wrap all the way around the array.
         for (int i = 0; i < numThreads; i++) {
-            DeltaThread d = new DeltaThread(new ArrayList<Vertex>(), 0, vertices[0], i);
+            
+            HashMap <Integer, ConcurrentLinkedQueue<String>> messQMap = new HashMap <> ();
+            for (int j = 0; j < numThreads; j++) {
+                if (i!=j) {
+                    messQMap.put(j, new ConcurrentLinkedQueue<>());
+                }
+            }
+            DeltaThread d = new DeltaThread(new ArrayList<Vertex>(), 0, vertices[0], i, messQMap);
             dts.add(d);//init threads
         }
         int threadCount = 0;//index of thread
